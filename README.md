@@ -87,6 +87,8 @@ keytool -importkeystore \
 > Regenerate these to get the right path to the .jks files!
 
 ### User:kafka
+
+```
 cat <<EOF > kafka.properties
 security.protocol=SSL
 ssl.truststore.location=$CFK_WALKTHROUGH_HOME/generated/truststore.jks
@@ -95,8 +97,11 @@ ssl.keystore.location=$CFK_WALKTHROUGH_HOME/generated/kafka-keystore.jks
 ssl.keystore.password=mystorepassword
 ssl.key.password=mystorepassword
 EOF
+```
 
 ### User:alice
+
+```
 cat <<EOF > alice.properties
 security.protocol=SSL
 ssl.truststore.location=$CFK_WALKTHROUGH_HOME/generated/truststore.jks
@@ -105,6 +110,7 @@ ssl.keystore.location=generated/alice@mydomain.example.jks
 ssl.keystore.password=mystorepassword
 ssl.key.password=mystorepassword
 EOF
+```
 
 ## Cluster external access (test working)
 
