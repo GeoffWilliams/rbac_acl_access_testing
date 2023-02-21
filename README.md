@@ -1,21 +1,30 @@
 # RBAC/ACL access testing
 Walkthrough of how to test confluent ACL + RBAC rule effectiveness by proof.
 
-# Prerequisites
+# TLDR
+1. RBAC and ACL co-exist as you would expect with deny ACLs trumping RBAC bindings
+2. OOTB access denied errors are only in the broker log
+3. OOTB `confluent-audit-log-events` only contains platform related audit events: create topic, create rbac rule, etc
+4. Enable auth logging -> `confluent-audit-log-events`: set confluent.security.event.logger.authentication.enable=true
+5. Enable logging produce/consume/describe fails -> `confluent-audit-log-events` set `confluent.security.event.router.config`. The value should be a single line JSON policy (voodoo), see project readme for example.
+
+# Proof
+
+## Prerequisites
 
 * RBAC enabled mTLS cluster with external access - https://github.com/GeoffWilliams/cfk_vault_mtls_rbac_walkthrough/
 * Confluent platform installed and binaries in $PATH
 
-# Setup
+## Setup
 
-## Environment variables
+### Environment variables
 
 ```
 # adjust as needed
 export CFK_WALKTHROUGH_HOME=~/github/cfk_vault_mtls_rbac_walkthrough
 ```
 
-## confluent cli
+### confluent cli
 
 ```
 confluent login --url https://kafka-mds.mydomain.example:443 \
@@ -24,7 +33,7 @@ username: kafka
 password: kafka-secret
 ```
 
-## Make test user credentials with OpenSSL
+### Make test user credentials with OpenSSL
 
 * `alice` already exists in our ldap container
 * Authenticate via mTLS certificate
@@ -33,7 +42,7 @@ password: kafka-secret
 > **Note**
 > Possible to do the CSR + key generation in one step
 
-### OpenSSL: key
+#### OpenSSL: key
 
 > **Note**
 > For funs we will use a long CN for alice, it will be extracted away by our `principalMappingRules`!
@@ -42,14 +51,14 @@ password: kafka-secret
 openssl genrsa -out generated/alice@mydomain.example.key.pem 2048
 ```
 
-### OpenSSL: csr
+#### OpenSSL: csr
 
 ```
 openssl req -new -key generated/alice@mydomain.example.key.pem -nodes -out generated/alice@mydomain.example.csr \
     -subj "/C=AU/ST=NSW/L=McMahons Point/O=World Domination Inc./CN=alice@mydomain.example"
 ```
 
-### OpenSSL: sign certificate
+#### OpenSSL: sign certificate
 
 ```
 openssl x509 -req -CA $CFK_WALKTHROUGH_HOME/generated/cacerts.pem \
@@ -59,9 +68,9 @@ openssl x509 -req -CA $CFK_WALKTHROUGH_HOME/generated/cacerts.pem \
     -days 365 -CAcreateserial
 ```
 
-### Java KeyStore (JKS) for alice
+#### Java KeyStore (JKS) for alice
 
-#### Extract .pks12 from certificate and key
+##### Extract .pks12 from certificate and key
 ```
 openssl pkcs12 -export \
 	-in "generated/alice@mydomain.example.pem" \
@@ -71,7 +80,7 @@ openssl pkcs12 -export \
 	-passout pass:mykeypassword
 ```
 
-### Create keystore and import pkcs12 file
+#### Create keystore and import pkcs12 file
 
 ```
 keytool -importkeystore \
@@ -84,12 +93,12 @@ keytool -importkeystore \
 	-srcstorepass mykeypassword
 ```
 
-## Kafka connection .properties files
+### Kafka connection .properties files
 
 > **Note**
 > Regenerate these to get the right path to the .jks files!
 
-### User:kafka
+#### User:kafka
 
 ```
 cat <<EOF > kafka.properties
@@ -102,7 +111,7 @@ ssl.key.password=mystorepassword
 EOF
 ```
 
-### User:alice
+#### User:alice
 
 ```
 cat <<EOF > alice.properties
@@ -115,7 +124,7 @@ ssl.key.password=mystorepassword
 EOF
 ```
 
-## Cluster external access (test working)
+### Cluster external access (test working)
 
 ```
 export CFK_WALKTHROUGH_HOME=~/github/cfk_vault_mtls_rbac_walkthrough
@@ -128,9 +137,9 @@ kafka-topics --command-config kafka.properties --bootstrap-server kafka.mydomain
 kafka-topics --command-config alice.properties --bootstrap-server kafka.mydomain.example:9092  --list
 ```
 
-# Test RBAC/ACL access conditions
+## Test RBAC/ACL access conditions
 
-## No rolebinding and no ACL -> no access
+### No rolebinding and no ACL -> no access
 
 Create topic as principal User:kafka
 
@@ -157,7 +166,7 @@ kafka-console-consumer --bootstrap-server kafka.mydomain.example:9092 --consumer
 
 Result: Not allowed
 
-## No rolebinding and (allow) ACL -> access allowed
+### No rolebinding and (allow) ACL -> access allowed
 
 Create topic as principal User:kafka
 
@@ -204,7 +213,7 @@ kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka
 ```
 
 
-## No rolebinding and (deny) ACL -> no access
+### No rolebinding and (deny) ACL -> no access
 
 Create topic as principal User:kafka
 
@@ -250,7 +259,7 @@ kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka
  --remove --allow-principal User:alice --operation read --group '*'
 ```
 
-## Rolebinding and (allow) ACL -> access allowed
+### Rolebinding and (allow) ACL -> access allowed
 
 Create topic as principal User:kafka
 
@@ -330,7 +339,7 @@ kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka
  --remove --allow-principal User:alice --operation read --group '*'
 ```
 
-## Rolebinding and (deny) ACL -> no access
+### Rolebinding and (deny) ACL -> no access
 
 Create topic as principal User:kafka
 
@@ -410,7 +419,7 @@ kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka
  --remove --allow-principal User:alice --operation read --group '*'
 ```
 
-## Rolebinding and no ACL -> access allowed
+### Rolebinding and no ACL -> access allowed
 
 Create topic as principal User:kafka
 
@@ -485,6 +494,19 @@ Cleanup
 kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka.properties \
  --remove --allow-principal User:alice --operation read --group '*'
 ```
+
+## Results
+
+* Works as expected
+
+| Condition                      | Expected       | Actual         |
+| ---                            | ---            | ---            |
+| No rolebinding and no ACL      | no access      | no access      |
+| No rolebinding and (allow) ACL | access allowed | access allowed |
+| No rolebinding and (deny) ACL  | no access      | no access      |
+| Rolebinding and (allow) ACL    | access allowed | access allowed |
+| Rolebinding and (deny) ACL     | no access      | no access      |
+| Rolebinding and no ACL         | access allowed | no access      |
 
 # Troubleshooting
 
@@ -739,16 +761,3 @@ The key indicates the principal and the value indicates the bind and looks like:
 ```
 {"_type":"RoleBinding","resources":[{"resourceType":"Topic","name":"yes.rb.allow.acl","patternType":"LITERAL"},{"resourceType":"Topic","name":"yes.rb.no.acl","patternType":"LITERAL"}]}
 ```
-
-# Results
-
-* Works as expected
-
-| Condition                      | Expected       | Actual         |
-| ---                            | ---            | ---            |
-| No rolebinding and no ACL      | no access      | no access      |
-| No rolebinding and (allow) ACL | access allowed | access allowed |
-| No rolebinding and (deny) ACL  | no access      | no access      |
-| Rolebinding and (allow) ACL    | access allowed | access allowed |
-| Rolebinding and (deny) ACL     | no access      | no access      |
-| Rolebinding and no ACL         | access allowed | no access      |
