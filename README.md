@@ -488,9 +488,163 @@ kafka-acls --bootstrap-server kafka.mydomain.example:9092 --command-config kafka
 
 # Troubleshooting
 
+## Where to find access denied errors?
+
+On an out-of-the-box CFK/CP setup the place to look for logs is the broker log. Here are some examples:
+
+Principal name extracted incorrectly. `User:alice.mydomain.example` should be `User:alice` to match our rules
+```
+kafka.authorizer.logger logAuthorization - Principal = User:alice.mydomain.example is Denied Operation = Write from host = 10.42.0.0 on resource = Topic:ANY`
+```
+
+`User:alice` denied access to topic
+```
+kafka.authorizer.logger logAuthorization - Principal = User:alice is Denied Operation = Describe from host = 172.21.0.1 on resource = Topic:LITERAL:rbactest
+```
+
+## What is the `confluent-audit-log-events` topic for and why doesn't it contain any RBAC/ACL logs?
+
+Reference: https://docs.confluent.io/platform/current/security/audit-logs/audit-logs-properties-config.html#configure-audit-logs
+
+On Confluent Platform, only these events are captured by default:
+
+* Topics: create and delete
+* ACLs: create and delete
+* Authorization requests related to RBAC (I *think* this means editing the rules themselves - asked)
+* Every event in the MANAGEMENT category
+
+This means the `confluent-audit-log-events` doesn't contain allow/deny information relating to topic access!
+
+## `confluent-audit-log-events` - enable logging of authentication
+
+Add to kafka server settings:
+
+```
+confluent.security.event.logger.authentication.enable=true
+```
+
+This will result in `confluent-audit-log-events` like this:
+
+```
+{"specversion":"1.0","id":"fbdeefc6-2ae9-4ae9-88cc-159c4f360c0e","source":"crn:///kafka=EyVCDzKYSc2vXhyD-z9PXg","type":"io.confluent.kafka.server/authentication","datacontenttype":"application/json","subject":"crn:///kafka=EyVCDzKYSc2vXhyD-z9PXg","time":"2023-02-21T06:07:38.958333Z","route":"confluent-audit-log-events","data":{"serviceName":"crn:///kafka\u003dEyVCDzKYSc2vXhyD-z9PXg","methodName":"kafka.Authentication","resourceName":"crn:///kafka\u003dEyVCDzKYSc2vXhyD-z9PXg","authenticationInfo":{"principal":"User:alice","metadata":{"mechanism":"SSL","identifier":"CN\u003dalice@mydomain.example,O\u003dWorld Domination Inc.,L\u003dMcMahons Point,ST\u003dNSW,C\u003dAU"},"principalResourceId":""},"requestMetadata":{"client_address":"/172.21.0.1"},"result":{"status":"SUCCESS","message":""}}}
+```
+
+> **Warning**
+> This only indicates status of **authentication**!
+
+> **Note**
+> Example CFK environment from https://github.com/GeoffWilliams/cfk_vault_mtls_rbac_walkthrough includes this setting but it is commented out for you to enable, matching the real world
+
+
+## `confluent-audit-log-events` - enable logging of producer/consumer/topic access denied events
+
+Add to kafka server settings:
+
+```
+confluent.security.event.router.config={big chunk of json}
+```
+
+The JSON format is described [here](https://docs.confluent.io/platform/current/security/audit-logs/audit-logs-properties-config.html#view-all-authorization-event-types). Note that the JSON must be all on one line! Or must have a `\` at the end of each line. Choose your poison.
+
+
+### Example router config to capture access denied errors
+
+```
+{
+    "routes": {
+        "crn:///kafka=*": {
+            "interbroker": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "describe": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "management": {
+                "allowed": "confluent-audit-log-events",
+                "denied": "confluent-audit-log-events"
+            }
+        },
+        "crn:///kafka=*/group=*": {
+            "consume": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "describe": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "management": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            }
+        },
+        "crn:///kafka=*/topic=*": {
+            "produce": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "consume": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            },
+            "describe": {
+                "allowed": "",
+                "denied": "confluent-audit-log-events"
+            }
+        }
+    },
+    "destinations": {
+        "topics": {
+            "confluent-audit-log-events": {}
+        }
+    },
+    "default_topics": {
+        "allowed": "confluent-audit-log-events",
+        "denied": "confluent-audit-log-events"
+    },
+    "excluded_principals": [
+        "User:kafka"
+    ]
+}
+```
+
+Pipe this through `jq -c` to get a single line of text.
+
+This will result in `confluent-audit-log-events` like this:
+
+```
+{"specversion":"1.0","id":"91b3626d-4b1a-49e0-9921-bdf120ced00d","source":"crn:///kafka=EyVCDzKYSc2vXhyD-z9PXg","type":"io.confluent.kafka.server/authorization","datacontenttype":"application/json","subject":"crn:///kafka=EyVCDzKYSc2vXhyD-z9PXg/topic=no.rb.no.acl","time":"2023-02-21T10:26:58.886604Z","route":"confluent-audit-log-events","data":{"serviceName":"crn:///kafka\u003dEyVCDzKYSc2vXhyD-z9PXg","methodName":"kafka.Metadata","resourceName":"crn:///kafka\u003dEyVCDzKYSc2vXhyD-z9PXg/topic\u003dno.rb.no.acl","authenticationInfo":{"principal":"User:alice","principalResourceId":""},"authorizationInfo":{"granted":false,"operation":"Describe","resourceType":"Topic","resourceName":"no.rb.no.acl","patternType":"LITERAL"},"request":{"correlation_id":"53","client_id":"console-producer"},"requestMetadata":{"client_address":"/172.21.0.1"}}}
+```
+
+You can then get fancy and pipe the events through `jq` to do things like filter for access denied errors...
+
+```
+kafka-console-consumer --bootstrap-server kafka.mydomain.example:9092 --consumer.config kafka.properties --topic confluent-audit-log-events | jq 'select(.data.authorizationInfo.granted == false)'
+```
+
+...or errors affecting a specific principal
+
+```
+kafka-console-consumer --bootstrap-server kafka.mydomain.example:9092 --consumer.config kafka.properties --topic confluent-audit-log-events | jq 'select(.data.authenticationInfo.principal == "User:alice")'
+```
+
+With `confluent-audit-log-events` containing interesting events, you can also plug in KSQL, Coran has written some example queries to route logs into different topics: https://github.com/coranstow/cc-Audit-Log-ksql/
+
+
+> **Note**
+> Example CFK environment from https://github.com/GeoffWilliams/cfk_vault_mtls_rbac_walkthrough includes this setting but it is commented out for you to enable, matching the real world
+
 ## Nothing works! not ACLs not RBACs!
 
-Check your principal name is extracted correctly from the CN in your certificate:
+Check your server is RBAC/ACL enabled:
+
+```
+authorizer.class.name=io.confluent.kafka.security.authorizer.ConfluentServerAuthorizer 
+```
+
+Check your principal name is extracted correctly from the CN in your certificate (mTLS):
 
 ```
 openssl x509 -in generated/alice@mydomain.example.pem -noout -subject | sed -n '/^subject/s/^.*CN = //p'
@@ -511,12 +665,54 @@ kubectl get kafkas.platform.confluent.io kafka -o json | jq '.spec.listeners[].a
 kafka-acls --command-config kafka.properties --bootstrap-server kafka.mydomain.example:9092 --list
 ```
 
-## List RBAC denied events
+## List all RBAC rules
 
-* How the heck do you do this? No output from this...
+No nice way to do this at the moment. See: [FF-9166](https://confluentinc.atlassian.net/browse/FF-9166)
+
+### Quick and dirty ways
+
+**1. confluent CLI**
+
+# setup environment vars first
+export CFK_WALKTHROUGH_HOME=~/github/cfk_vault_mtls_rbac_walkthrough
+export CP_MDS_URL=https://kafka-mds.mydomain.example:443
+
+export CLUSTER_ID=$(confluent cluster describe --url $CP_MDS_URL --ca-cert-path $CFK_WALKTHROUGH_HOME/generated/cacerts.pem | awk '/kafka-cluster/ { print $3}')
+for ROLE in $(confluent iam rbac role list -o json | jq -r .[].name) ; do
+  echo "[$ROLE]"
+  confluent iam rbac role-binding list --kafka-cluster-id $CLUSTER_ID --role $ROLE
+  echo
+done
+
+**2. MDS REST API**
+
+> List all rolebindings you can run the following for each role: https://docs.confluent.io/platform/current/security/rbac/mds-api.html#post--security-1.0-lookup-role-roleName
+> 
+> Which gets a list of Users as a return for every role. For each User you can issue the following API:
+> 
+> https://docs.confluent.io/platform/current/security/rbac/mds-api.html#get--security-1.0-lookup-rolebindings-principal-principal
+
+**3. Read the topic directly**
+
+Rolebinding info is kept in `_confluent-metadata-auth`. This is a multi-use topic including rolebinding records and internal MDS status. 
+
+> **Note**
+> If inspecting with `kafka-console-consumer` be sure to print the key or the data will be incomplete.
+
+> **Note**
+> Because all the role bindings are kept in a topic, you are able to copy rolebindings to other kafka servers by copying (or syncing) the topic data 😎
+
+Example:
 
 ```
-kafka-console-consumer --bootstrap-server kafka.mydomain.example:9092 --consumer.config kafka.properties --topic confluent-audit-log-events | jq 'select(.data.authorizationInfo.granted == false)'
+{"_type":"RoleBinding","principal":"User:alice","role":"DeveloperWrite","scope":{"clusters":{"kafka-cluster":"EyVCDzKYSc2vXhyD-z9PXg"}}}   {"_type":"RoleBinding","resources":[{"resourceType":"Topic","name":"yes.rb.deny.acl","patternType":"LITERAL"}]}
+```
+
+
+The key indicates the principal and the value indicates the bind and looks like:
+
+```
+{"_type":"RoleBinding","resources":[{"resourceType":"Topic","name":"yes.rb.allow.acl","patternType":"LITERAL"},{"resourceType":"Topic","name":"yes.rb.no.acl","patternType":"LITERAL"}]}
 ```
 
 # Results
