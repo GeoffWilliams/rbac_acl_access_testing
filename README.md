@@ -546,6 +546,31 @@ confluent.security.event.router.config={big chunk of json}
 
 The JSON format is described [here](https://docs.confluent.io/platform/current/security/audit-logs/audit-logs-properties-config.html#view-all-authorization-event-types). Note that the JSON must be all on one line! Or must have a `\` at the end of each line. Choose your poison.
 
+Your advised to first look at the existing settings before adding your rules. On a fresh CFK deployment I have:
+
+```
+confluent audit-log config describe
+
+
+{
+  "destinations": {
+    "topics": {
+      "confluent-audit-log-events": {
+        "retention_ms": 7776000000
+      }
+    }
+  },
+  "default_topics": {
+    "allowed": "confluent-audit-log-events",
+    "denied": "confluent-audit-log-events"
+  },
+  "metadata": {
+    "resource_version": "L38PPqakrbU5zX1bqdjz_A",
+    "modified_since": "2023-02-21T08:54:31Z"
+  }
+}
+```
+
 
 ### Example router config to capture access denied errors
 
